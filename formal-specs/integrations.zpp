@@ -1,0 +1,544 @@
+/*******************************************************************************
+ * INTEGRATIONS FORMAL SPECIFICATION
+ * System: Cloudflare Documentation Platform
+ * Language: Z++ (Z Notation Extensions)
+ * 
+ * This specification formally models external integration contracts:
+ * - Cloudflare Workers API
+ * - Cloudflare R2 storage
+ * - Algolia DocSearch
+ * - Git-based operations
+ ******************************************************************************/
+
+/* Import types from previous specifications */
+given [EnhancedSystemState, HTTPRequest, HTTPResponse, FilePath, URLString]
+given [StaticAsset, BuildArtifacts, R2Object, DocsPage]
+
+/*******************************************************************************
+ * PART 1: CLOUDFLARE WORKERS PLATFORM INTEGRATION
+ ******************************************************************************/
+
+/* Worker Deployment Configuration
+ * Wrangler.toml configuration mapped to formal specification
+ */
+┌─ WorkerDeploymentConfig ──────────────────────────────────────────────────┐
+│ name : seq ℂ                                                                │
+│ accountId : seq ℂ                                                           │
+│ compatibilityDate : seq ℂ                                                   │
+│ compatibilityFlags : ℙ(seq ℂ)                                              │
+│ mainModule : FilePath                                                       │
+│ route : URLString × seq ℂ                                                  │
+│ observabilityEnabled : 𝔹                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #name > 0                                                                   │
+│ ∧ #accountId = 32 /* Cloudflare account ID format */                       │
+│ ∧ compatibilityDate matches /^\d{4}-\d{2}-\d{2}$/                          │
+│ ∧ "nodejs_compat" ∈ compatibilityFlags                                     │
+│ ∧ mainModule = "./worker/index.ts"                                          │
+│ ∧ let (pattern, zoneName) = route •                                        │
+│     pattern = "developers.cloudflare.com/*" ∧                               │
+│     zoneName = "developers.cloudflare.com"                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Worker Entrypoint Interface
+ * Formal contract for the Worker class
+ */
+┌─ WorkerEntrypoint ────────────────────────────────────────────────────────┐
+│ env : WorkerEnvironment                                                     │
+│ ctx : ExecutionContext                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Environment bindings must be configured */                              │
+│ env.assetsBinding ≠ null                                                    │
+│ ∧ env.r2Bucket ≠ null                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Worker Fetch Operation
+ * Main request handler interface
+ */
+┌─ WorkerFetch ─────────────────────────────────────────────────────────────┐
+│ entrypoint : WorkerEntrypoint                                               │
+│ request? : HTTPRequest                                                      │
+│ response! : HTTPResponse                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Request is valid HTTP */                                 │
+│ #request?.url > 0                                                           │
+│ ∧ request?.method ∈ {GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS}        │
+│                                                                             │
+│ /* Post-condition: Response is valid HTTP */                               │
+│ ∧ response!.statusCode ≥ 100 ∧ response!.statusCode < 600                 │
+│                                                                             │
+│ /* Response time constraint */                                             │
+│ ∧ responseTime < 50 /* milliseconds - fast edge response */                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Worker Limits and Constraints
+ * Platform-enforced limits
+ */
+┌─ WorkerLimits ────────────────────────────────────────────────────────────┐
+│ cpuTimeLimit : ℤ                                                            │
+│ memoryLimit : ℤ                                                             │
+│ requestBodyLimit : ℤ                                                        │
+│ responseBodyLimit : ℤ                                                       │
+│ subrequestLimit : ℤ                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ cpuTimeLimit = 50 /* milliseconds */                                        │
+│ ∧ memoryLimit = 128 /* MB */                                                │
+│ ∧ requestBodyLimit = 100 /* MB */                                           │
+│ ∧ responseBodyLimit = 100 /* MB */                                          │
+│ ∧ subrequestLimit = 50                                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 2: CLOUDFLARE R2 STORAGE INTEGRATION
+ ******************************************************************************/
+
+/* R2 Bucket Configuration
+ * Binding configuration for R2 storage
+ */
+┌─ R2BucketConfig ──────────────────────────────────────────────────────────┐
+│ bindingName : seq ℂ                                                         │
+│ bucketName : seq ℂ                                                          │
+│ jurisdiction : seq ℂ ∪ {null}                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ bindingName = "VENDORED_MARKDOWN"                                           │
+│ ∧ bucketName = "vendored-markdown"                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* R2 Get Operation
+ * Retrieve object from R2 bucket
+ */
+┌─ R2Get ───────────────────────────────────────────────────────────────────┐
+│ ΞWorkerEnvironment                                                          │
+│ key? : seq ℂ                                                                │
+│ object! : R2Object ∪ {null}                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Key is non-empty */                                      │
+│ #key? > 0                                                                   │
+│                                                                             │
+│ /* Post-condition: Object retrieved if exists */                           │
+│ ∧ key? ∈ dom r2Bucket.objects ⇒                                            │
+│     object! = r2Bucket.objects(key?) |                                      │
+│   key? ∉ dom r2Bucket.objects ⇒                                            │
+│     object! = null                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* R2 Put Operation
+ * Store object in R2 bucket
+ */
+┌─ R2Put ───────────────────────────────────────────────────────────────────┐
+│ ΔWorkerEnvironment                                                          │
+│ key? : seq ℂ                                                                │
+│ content? : seq ℂ                                                            │
+│ contentType? : seq ℂ                                                        │
+│ success! : 𝔹                                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ #key? > 0                                                                   │
+│ ∧ #content? > 0                                                             │
+│ ∧ #contentType? > 0                                                         │
+│                                                                             │
+│ /* Post-condition: Object is stored */                                     │
+│ ∧ success! = true ⇒                                                         │
+│     let obj = {                                                             │
+│         key ↦ key?,                                                         │
+│         sizeBytes ↦ #content?,                                              │
+│         etag ↦ sha256(content?),                                            │
+│         uploaded ↦ currentTime,                                             │
+│         contentType ↦ contentType?                                          │
+│     } •                                                                     │
+│         r2Bucket'.objects = r2Bucket.objects ⊕ {key? ↦ obj}                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* R2 List Operation
+ * List objects in bucket with optional prefix
+ */
+┌─ R2List ──────────────────────────────────────────────────────────────────┐
+│ ΞWorkerEnvironment                                                          │
+│ prefix? : seq ℂ                                                             │
+│ limit? : ℤ                                                                  │
+│ objects! : seq R2Object                                                     │
+│ truncated! : 𝔹                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ limit? > 0 ∧ limit? ≤ 1000                                                 │
+│                                                                             │
+│ /* Post-condition: Objects matching prefix returned */                     │
+│ ∧ let matchingObjects = {                                                   │
+│     obj : ran r2Bucket.objects |                                            │
+│         startsWith(obj.key, prefix?)                                        │
+│   } •                                                                       │
+│     #matchingObjects ≤ limit? ⇒                                            │
+│         objects! = take(limit?, matchingObjects) ∧                          │
+│         truncated! = false |                                                │
+│     #matchingObjects > limit? ⇒                                            │
+│         objects! = take(limit?, matchingObjects) ∧                          │
+│         truncated! = true                                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* R2 Delete Operation
+ * Remove object from bucket
+ */
+┌─ R2Delete ────────────────────────────────────────────────────────────────┐
+│ ΔWorkerEnvironment                                                          │
+│ key? : seq ℂ                                                                │
+│ success! : 𝔹                                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Key is non-empty */                                      │
+│ #key? > 0                                                                   │
+│                                                                             │
+│ /* Post-condition: Object is removed if it existed */                      │
+│ ∧ key? ∈ dom r2Bucket.objects ⇒                                            │
+│     r2Bucket'.objects = r2Bucket.objects \ {key?} ∧                        │
+│     success! = true |                                                       │
+│   key? ∉ dom r2Bucket.objects ⇒                                            │
+│     r2Bucket' = r2Bucket ∧                                                  │
+│     success! = false                                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 3: ALGOLIA DOCSEARCH INTEGRATION
+ ******************************************************************************/
+
+/* Algolia Configuration
+ * DocSearch integration settings
+ */
+┌─ AlgoliaConfig ───────────────────────────────────────────────────────────┐
+│ appId : seq ℂ                                                               │
+│ apiKey : seq ℂ                                                              │
+│ indexName : seq ℂ                                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #appId > 0                                                                  │
+│ ∧ #apiKey > 0                                                               │
+│ ∧ #indexName > 0                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Search Index Record
+ * Document structure for Algolia indexing
+ */
+┌─ SearchIndexRecord ───────────────────────────────────────────────────────┐
+│ objectID : seq ℂ                                                            │
+│ url : URLString                                                             │
+│ title : seq ℂ                                                               │
+│ content : seq ℂ                                                             │
+│ hierarchy : seq ℂ ↦ seq ℂ                                                  │
+│ anchor : seq ℂ ∪ {null}                                                    │
+│ type : seq ℂ                                                                │
+│ weight : ℤ                                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #objectID > 0                                                               │
+│ ∧ #title > 0                                                                │
+│ ∧ type ∈ {"lvl0", "lvl1", "lvl2", "lvl3", "content"}                      │
+│ ∧ weight ≥ 0                                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Index Documentation Page
+ * Convert documentation page to search records
+ */
+┌─ IndexDocumentationPage ──────────────────────────────────────────────────┐
+│ page? : DocsPage                                                            │
+│ records! : ℙ(SearchIndexRecord)                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Generate record for page title */                                       │
+│ ∃ titleRecord : records! •                                                  │
+│     titleRecord.objectID = page?.slug ⌢ "#title" ∧                         │
+│     titleRecord.url = baseUrl ⌢ page?.slug ∧                               │
+│     titleRecord.title = page?.title ∧                                       │
+│     titleRecord.type = "lvl0" ∧                                             │
+│     titleRecord.weight = 100                                                │
+│                                                                             │
+│ /* Generate records for each heading */                                    │
+│ ∧ ∀ heading : extractHeadings(page?.content) •                             │
+│     ∃ headingRecord : records! •                                            │
+│         headingRecord.objectID =                                            │
+│             page?.slug ⌢ "#" ⌢ heading.id ∧                                │
+│         headingRecord.url =                                                 │
+│             baseUrl ⌢ page?.slug ⌢ "#" ⌢ heading.id ∧                      │
+│         headingRecord.title = heading.text ∧                                │
+│         headingRecord.type = "lvl" ⌢ toString(heading.level) ∧             │
+│         headingRecord.weight = 100 - (heading.level × 10)                  │
+│                                                                             │
+│ /* Generate records for content sections */                                │
+│ ∧ ∀ section : extractSections(page?.content) •                             │
+│     ∃ contentRecord : records! •                                            │
+│         contentRecord.objectID =                                            │
+│             page?.slug ⌢ "#content-" ⌢ toString(section.index) ∧           │
+│         contentRecord.content = section.text ∧                              │
+│         contentRecord.type = "content" ∧                                    │
+│         contentRecord.weight = 50                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Algolia Index Operation
+ * Upload records to search index
+ */
+┌─ AlgoliaIndex ────────────────────────────────────────────────────────────┐
+│ config : AlgoliaConfig                                                      │
+│ records? : ℙ(SearchIndexRecord)                                            │
+│ success! : 𝔹                                                                │
+│ indexedCount! : ℤ                                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Records are non-empty */                                 │
+│ #records? > 0                                                               │
+│                                                                             │
+│ /* Post-condition: Records uploaded in batches */                          │
+│ ∧ let batches = partition(records?, 1000) •                                │
+│     ∀ batch : batches •                                                     │
+│         uploadBatch(config, batch) ∧                                        │
+│     indexedCount! = #records? ∧                                             │
+│     success! = true                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Algolia Search Operation
+ * Query the search index
+ */
+┌─ AlgoliaSearch ───────────────────────────────────────────────────────────┐
+│ config : AlgoliaConfig                                                      │
+│ query? : seq ℂ                                                              │
+│ filters? : seq ℂ ∪ {null}                                                  │
+│ hitsPerPage? : ℤ                                                            │
+│ results! : seq SearchIndexRecord                                            │
+│ totalHits! : ℤ                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ #query? > 0                                                                 │
+│ ∧ hitsPerPage? > 0 ∧ hitsPerPage? ≤ 100                                    │
+│                                                                             │
+│ /* Post-condition: Results ranked by relevance */                          │
+│ ∧ #results! ≤ hitsPerPage?                                                 │
+│ ∧ totalHits! ≥ #results!                                                   │
+│ ∧ ∀ i : 1..#results!-1 •                                                   │
+│     results!(i).weight ≥ results!(i+1).weight                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 4: GIT INTEGRATION
+ ******************************************************************************/
+
+/* Git Configuration
+ * Repository and authentication settings
+ */
+┌─ GitConfig ───────────────────────────────────────────────────────────────┐
+│ repositoryUrl : URLString                                                   │
+│ defaultBranch : seq ℂ                                                       │
+│ authToken : seq ℂ ∪ {null}                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #repositoryUrl > 0                                                          │
+│ ∧ repositoryUrl matches /^https:\/\/github\.com\/.+/                       │
+│ ∧ defaultBranch ∈ {"main", "master", "production"}                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Git Commit Information
+ * Metadata about a git commit
+ */
+┌─ GitCommit ───────────────────────────────────────────────────────────────┐
+│ sha : seq ℂ                                                                 │
+│ author : seq ℂ                                                              │
+│ authorEmail : seq ℂ                                                         │
+│ date : seq ℂ                                                                │
+│ message : seq ℂ                                                             │
+│ files : ℙ(FilePath)                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #sha = 40 /* Git SHA-1 hash */                                             │
+│ ∧ #author > 0                                                               │
+│ ∧ #message > 0                                                              │
+│ ∧ date matches /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Get Last Modified Date
+ * Retrieve last git modification for a file
+ */
+┌─ GitGetLastModified ──────────────────────────────────────────────────────┐
+│ config : GitConfig                                                          │
+│ filePath? : FilePath                                                        │
+│ lastModified! : seq ℂ ∪ {null}                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: File path is valid */                                    │
+│ #filePath? > 0                                                              │
+│                                                                             │
+│ /* Post-condition: Last commit date for file */                            │
+│ ∧ let commits = gitLog(filePath?) •                                        │
+│     #commits > 0 ⇒                                                          │
+│         lastModified! = first(commits).date |                               │
+│     #commits = 0 ⇒                                                          │
+│         lastModified! = null                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Generate Sitemap with Last Modified
+ * Create sitemap.xml with git-based timestamps
+ */
+┌─ GenerateSitemapWithGit ──────────────────────────────────────────────────┐
+│ ΞEnhancedSystemState                                                        │
+│ gitConfig : GitConfig                                                       │
+│ sitemap! : seq ℂ                                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Build is complete */                                     │
+│ buildState.status = completed                                               │
+│                                                                             │
+│ /* Post-condition: Sitemap includes all pages with lastmod */              │
+│ ∧ ∀ page : ran contentRepo.docs.pages •                                    │
+│     let url = baseUrl ⌢ page.slug •                                        │
+│         let lastMod = gitGetLastModified(gitConfig, page.filePath) •        │
+│             sitemap! contains ⟨url, lastMod⟩                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 5: ASSETS BINDING INTEGRATION
+ ******************************************************************************/
+
+/* Assets Binding Configuration
+ * Static asset serving configuration
+ */
+┌─ AssetsBindingConfig ─────────────────────────────────────────────────────┐
+│ directory : FilePath                                                        │
+│ bindingName : seq ℂ                                                         │
+│ notFoundHandling : seq ℂ                                                    │
+│ runWorkerFirst : 𝔹                                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ directory = "./dist"                                                        │
+│ ∧ bindingName = "ASSETS"                                                    │
+│ ∧ notFoundHandling = "404-page"                                             │
+│ ∧ runWorkerFirst = true                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Fetch Asset from Binding
+ * Retrieve static file from assets binding
+ */
+┌─ FetchAssetFromBinding ───────────────────────────────────────────────────┐
+│ ΞWorkerEnvironment                                                          │
+│ path? : FilePath                                                            │
+│ response! : HTTPResponse                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Path is valid */                                         │
+│ #path? > 0                                                                  │
+│                                                                             │
+│ /* Post-condition: Asset served or 404 */                                  │
+│ ∧ path? ∈ assetsBinding.availablePaths ⇒                                   │
+│     response!.status = ok_200 ∧                                             │
+│     response!.statusCode = 200 ∧                                            │
+│     response!.body = readFile(assetsBinding.directory ⌢ path?) ∧           │
+│     response!.headers("Content-Type") = mimeType(path?) |                   │
+│   path? ∉ assetsBinding.availablePaths ⇒                                   │
+│     response!.status = notFound_404 ∧                                       │
+│     response!.statusCode = 404                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 6: REDIRECTS FILE PARSING
+ ******************************************************************************/
+
+/* Redirect File Format
+ * Format: source destination [status]
+ */
+┌─ RedirectFileLine ────────────────────────────────────────────────────────┐
+│ source : seq ℂ                                                              │
+│ destination : seq ℂ                                                         │
+│ statusCode : ℤ                                                              │
+│ isComment : 𝔹                                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #source > 0 ∨ isComment = true                                             │
+│ ∧ ¬isComment ⇒                                                              │
+│     #destination > 0 ∧                                                      │
+│     statusCode ∈ {301, 302, 307, 308}                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Parse Redirects File
+ * Convert __redirects file to redirect rules
+ */
+┌─ ParseRedirectsFile ──────────────────────────────────────────────────────┐
+│ fileContent? : seq ℂ                                                        │
+│ staticRules! : seq RedirectRule                                             │
+│ dynamicRules! : seq RedirectRule                                            │
+│ parseErrors! : seq(seq ℂ)                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: File content is non-empty */                             │
+│ #fileContent? > 0                                                           │
+│                                                                             │
+│ /* Parse each line */                                                       │
+│ ∧ let lines = split(fileContent?, '\n') •                                  │
+│     ∀ line : lines •                                                        │
+│         ¬startsWith(trim(line), '#') ∧ #trim(line) > 0 ⇒                   │
+│             let parts = split(trim(line), ' ') •                            │
+│                 #parts ≥ 2 ⇒                                                │
+│                     let rule = {                                            │
+│                         sourcePattern ↦ parts(1),                           │
+│                         targetUrl ↦ parts(2),                               │
+│                         statusCode ↦ (#parts ≥ 3 ⇒ toInt(parts(3)) | 301),│
+│                         isRegex ↦ contains(parts(1), '*') ∨                │
+│                                   contains(parts(1), ':'),                  │
+│                         priority ↦ calculatePriority(parts(1))             │
+│                     } •                                                     │
+│                         rule.isRegex = false ⇒                              │
+│                             staticRules! = staticRules! ⌢ ⟨rule⟩ |         │
+│                         rule.isRegex = true ⇒                               │
+│                             dynamicRules! = dynamicRules! ⌢ ⟨rule⟩         │
+│                                                                             │
+│ /* Enforce limits */                                                        │
+│ ∧ #staticRules! ≤ 10000                                                     │
+│ ∧ #dynamicRules! ≤ 2000                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 7: HTML TO MARKDOWN CONVERSION
+ ******************************************************************************/
+
+/* HTML to Markdown Converter
+ * External integration for on-demand conversion
+ */
+┌─ HTMLToMarkdown ──────────────────────────────────────────────────────────┐
+│ html? : seq ℂ                                                               │
+│ baseUrl? : URLString                                                        │
+│ markdown! : seq ℂ ∪ {null}                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ #html? > 0                                                                  │
+│ ∧ #baseUrl? > 0                                                             │
+│                                                                             │
+│ /* Post-condition: HTML converted to markdown */                           │
+│ ∧ isValidHTML(html?) ⇒                                                      │
+│     let dom = parseHTML(html?) •                                            │
+│         let mainContent = selectMainContent(dom) •                          │
+│             mainContent ≠ null ⇒                                            │
+│                 markdown! = convertToMarkdown(mainContent) ∧                │
+│                 #markdown! > 0 |                                            │
+│             mainContent = null ⇒                                            │
+│                 markdown! = null |                                          │
+│   ¬isValidHTML(html?) ⇒                                                     │
+│     markdown! = null                                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 8: COMPLETE DEPLOYMENT OPERATION
+ ******************************************************************************/
+
+/* Deploy to Cloudflare
+ * Complete deployment workflow
+ */
+┌─ DeployToCloudflare ──────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+│ workerConfig : WorkerDeploymentConfig                                       │
+│ r2Config : R2BucketConfig                                                   │
+│ assetsConfig : AssetsBindingConfig                                          │
+│ success! : 𝔹                                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ buildState.status = completed                                               │
+│ ∧ buildState.artifacts ≠ null                                               │
+│                                                                             │
+│ /* Upload static assets */                                                  │
+│ ∧ ∀ asset : ran buildState.artifacts.assets •                              │
+│     uploadAsset(assetsConfig, asset)                                        │
+│                                                                             │
+│ /* Upload vendored markdown to R2 */                                       │
+│ ∧ uploadToR2(r2Config, "markdown.zip", generateMarkdownZip()) ∧            │
+│   uploadToR2(r2Config, "llms-full.txt", generateLLMSTxt())                 │
+│                                                                             │
+│ /* Deploy worker */                                                         │
+│ ∧ deployWorker(workerConfig)                                                │
+│                                                                             │
+│ /* Update system state */                                                   │
+│ ∧ stage' = production ∧                                                     │
+│   success! = true                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * END OF INTEGRATIONS SPECIFICATION
+ ******************************************************************************/

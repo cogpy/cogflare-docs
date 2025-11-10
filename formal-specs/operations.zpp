@@ -1,0 +1,566 @@
+/*******************************************************************************
+ * OPERATIONS FORMAL SPECIFICATION
+ * System: Cloudflare Documentation Platform
+ * Language: Z++ (Z Notation Extensions)
+ * 
+ * This specification formally models the core operations including:
+ * - Content loading and processing
+ * - Markdown/MDX transformation
+ * - Static site generation
+ * - Worker request handling
+ ******************************************************************************/
+
+/* Import types from previous specifications */
+given [EnhancedSystemState, SystemState, BuildProcessState, WorkerRuntimeState]
+given [ContentRepository, DocsPage, HTTPRequest, HTTPResponse]
+given [BuildPhase, BuildStatus, HTTPStatus, CacheStatus]
+given [MarkdownContent, FilePath, URLString, StaticAsset]
+given [ASTNode, PluginContext, RedirectRule]
+
+/*******************************************************************************
+ * PART 1: BUILD OPERATIONS
+ ******************************************************************************/
+
+/* Start Build Process
+ * Initiates the Astro build pipeline
+ */
+┌─ StartBuild ──────────────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ buildState.status = notStarted                                              │
+│                                                                             │
+│ /* Post-conditions */                                                       │
+│ ∧ buildState'.status = inProgress                                           │
+│ ∧ buildState'.currentPhase = initialization                                 │
+│ ∧ buildState'.startTime = currentTime                                       │
+│ ∧ buildState'.endTime = null                                                │
+│ ∧ buildState'.errors = ⟨⟩                                                  │
+│                                                                             │
+│ /* Other state unchanged */                                                 │
+│ ∧ contentRepo' = contentRepo                                                │
+│ ∧ workerState' = workerState                                                │
+│ ∧ cache' = cache                                                            │
+│ ∧ analytics' = analytics                                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Load Content
+ * Loads MDX content from filesystem using Astro loaders
+ */
+┌─ LoadContent ─────────────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+│ contentPaths? : ℙ(FilePath)                                                │
+│ loadedPages! : ℙ(DocsPage)                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ buildState.status = inProgress                                              │
+│ ∧ buildState.currentPhase = contentLoading                                  │
+│ ∧ #contentPaths? > 0                                                        │
+│                                                                             │
+│ /* Post-conditions */                                                       │
+│ ∧ loadedPages! = {                                                          │
+│     p : DocsPage |                                                          │
+│         p.filePath ∈ contentPaths? ∧                                        │
+│         p.content ≠ "" ∧                                                    │
+│         p.slug ≠ ""                                                         │
+│   }                                                                         │
+│                                                                             │
+│ /* Content repository is updated */                                        │
+│ ∧ contentRepo'.docs.pages =                                                 │
+│     contentRepo.docs.pages ∪                                                │
+│     {p.slug ↦ p | p : loadedPages!}                                        │
+│                                                                             │
+│ /* Build state updated with any errors */                                  │
+│ ∧ let invalidFiles = contentPaths? \ {p.filePath | p : loadedPages!} •    │
+│     #invalidFiles > 0 ⇒                                                     │
+│         buildState'.errors = buildState.errors ⌢                            │
+│             ⟨"Failed to load: " ⌢ f | f : invalidFiles⟩                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Validate Schema
+ * Validates content against Zod schemas
+ */
+┌─ ValidateSchema ──────────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+│ page? : DocsPage                                                            │
+│ valid! : 𝔹                                                                  │
+│ validationErrors! : ℙ(seq ℂ)                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ buildState.status = inProgress                                              │
+│ ∧ buildState.currentPhase = schemaValidation                                │
+│                                                                             │
+│ /* Validation checks */                                                     │
+│ ∧ valid! = (                                                                │
+│     #page?.title > 0 ∧                                                      │
+│     #page?.content > 0 ∧                                                    │
+│     #page?.slug > 0 ∧                                                       │
+│     page?.products ⊆ dom contentRepo.products.products ∧                   │
+│     (page?.sidebar ≠ null ⇒ page?.sidebar.order ≥ 0) ∧                    │
+│     (page?.pcxContentType ≠ null ⇒                                         │
+│         page?.pcxContentType ∈ {concept, tutorial, howTo, ...})            │
+│   )                                                                         │
+│                                                                             │
+│ /* Collect validation errors */                                            │
+│ ∧ validationErrors! = {                                                     │
+│     err : seq ℂ |                                                           │
+│         (#page?.title = 0 ⇒ err = "Missing title") ∨                       │
+│         (#page?.content = 0 ⇒ err = "Missing content") ∨                   │
+│         (#page?.slug = 0 ⇒ err = "Missing slug") ∨                         │
+│         (¬(page?.products ⊆ dom contentRepo.products.products) ⇒           │
+│             err = "Invalid product reference")                              │
+│   }                                                                         │
+│                                                                             │
+│ /* Update build state with errors if validation fails */                   │
+│ ∧ ¬valid! ⇒                                                                 │
+│     buildState'.errors = buildState.errors ⌢                                │
+│         ⟨page?.filePath ⌢ ": " ⌢ e | e : validationErrors!⟩               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Transform Markdown - Remark Plugin
+ * Applies remark plugin transformation to markdown AST
+ */
+┌─ ApplyRemarkPlugin ───────────────────────────────────────────────────────┐
+│ ΔPluginContext                                                              │
+│ pluginName? : seq ℂ                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: AST exists */                                            │
+│ ast ≠ null                                                                  │
+│                                                                             │
+│ /* Post-condition: AST is transformed */                                   │
+│ ∧ (pluginName? = "validate-images" ⇒                                       │
+│     /* Validate all image references exist */                              │
+│     ∀ node : descendantsOf(ast') •                                         │
+│         node.nodeType = "image" ⇒                                           │
+│             node.properties("src") ∈ validImagePaths)                       │
+│                                                                             │
+│ /* Errors recorded if validation fails */                                  │
+│ ∧ errors' = errors ⌢                                                        │
+│     {err | node : descendantsOf(ast') •                                    │
+│         node.nodeType = "image" ∧                                           │
+│         node.properties("src") ∉ validImagePaths ∧                         │
+│         err = "Invalid image: " ⌢ node.properties("src")}                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Transform HTML - Rehype Plugin
+ * Applies rehype plugin transformation to HTML AST
+ */
+┌─ ApplyRehypePlugin ───────────────────────────────────────────────────────┐
+│ ΔPluginContext                                                              │
+│ pluginName? : seq ℂ                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: HTML AST exists */                                       │
+│ ast ≠ null ∧ ast.nodeType = "root"                                         │
+│                                                                             │
+│ /* Mermaid diagram processing */                                           │
+│ ∧ (pluginName? = "mermaid" ⇒                                               │
+│     ∀ node : descendantsOf(ast') •                                         │
+│         node.nodeType = "code" ∧                                            │
+│         node.properties("lang") = "mermaid" ⇒                               │
+│             ∃ svgNode : ASTNode •                                           │
+│                 svgNode.nodeType = "element" ∧                              │
+│                 svgNode.properties("tagName") = "svg" ∧                     │
+│                 svgNode ∈ descendantsOf(ast'))                              │
+│                                                                             │
+│ /* Autolink headings */                                                    │
+│ ∧ (pluginName? = "autolink-headings" ⇒                                     │
+│     ∀ node : descendantsOf(ast') •                                         │
+│         node.nodeType = "heading" ⇒                                         │
+│             ∃ linkNode : node.children •                                    │
+│                 linkNode.nodeType = "link" ∧                                │
+│                 linkNode.properties("href") = "#" ⌢                         │
+│                     slugify(textContentOf(node)))                           │
+│                                                                             │
+│ /* Generate heading slugs */                                               │
+│ ∧ (pluginName? = "heading-slugs" ⇒                                         │
+│     ∀ node : descendantsOf(ast') •                                         │
+│         node.nodeType = "heading" ⇒                                         │
+│             "id" ∈ dom node.properties ∧                                    │
+│             node.properties("id") = slugify(textContentOf(node)))           │
+│                                                                             │
+│ /* External link handling */                                               │
+│ ∧ (pluginName? = "external-links" ⇒                                        │
+│     ∀ node : descendantsOf(ast') •                                         │
+│         node.nodeType = "link" ∧                                            │
+│         isExternalUrl(node.properties("href")) ⇒                            │
+│             node.properties("target") = "_blank" ∧                          │
+│             node.properties("rel") = "noopener noreferrer")                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Process Markdown Pipeline
+ * Complete markdown-to-HTML transformation
+ */
+┌─ ProcessMarkdown ─────────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+│ markdownContent? : MarkdownContent                                          │
+│ filePath? : FilePath                                                        │
+│ html! : seq ℂ                                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ buildState.status = inProgress                                              │
+│ ∧ buildState.currentPhase = markdownProcessing                              │
+│ ∧ #markdownContent? > 0                                                     │
+│                                                                             │
+│ /* Processing pipeline */                                                   │
+│ ∧ ∃ ctx : PluginContext •                                                  │
+│     ctx.currentFile = filePath? ∧                                           │
+│     /* Parse markdown to AST */                                             │
+│     ctx.ast = parseMDX(markdownContent?) ∧                                  │
+│     /* Apply remark plugins */                                              │
+│     ctx' = applyRemarkPlugins(ctx) ∧                                        │
+│     /* Convert to HTML AST */                                               │
+│     ctx'' = markdownToHtml(ctx') ∧                                          │
+│     /* Apply rehype plugins */                                              │
+│     ctx''' = applyRehypePlugins(ctx'') ∧                                    │
+│     /* Generate HTML */                                                     │
+│     html! = stringifyHTML(ctx'''.ast)                                       │
+│                                                                             │
+│ /* Record plugin context */                                                 │
+│ ∧ buildState'.pluginContexts =                                              │
+│     buildState.pluginContexts ⌢ ⟨ctx'''⟩                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Generate Static Assets
+ * Creates final build artifacts
+ */
+┌─ GenerateStaticAssets ────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ buildState.status = inProgress                                              │
+│ ∧ buildState.currentPhase ∈ {bundling, assetOptimization}                  │
+│ ∧ #(ran contentRepo.docs.pages) > 0                                        │
+│                                                                             │
+│ /* Generate HTML pages for each doc */                                     │
+│ ∧ ∃ assets : FilePath ↦ StaticAsset •                                      │
+│     /* For each docs page, create HTML asset */                            │
+│     (∀ page : ran contentRepo.docs.pages •                                 │
+│         ∃ asset : ran assets •                                              │
+│             asset.path = page.slug ⌢ "/index.html" ∧                       │
+│             asset.assetType = html ∧                                        │
+│             asset.sourceFile = page.filePath) ∧                             │
+│     /* Generate sitemap */                                                  │
+│     (∃ sitemap : ran assets •                                               │
+│         sitemap.path = "sitemap.xml" ∧                                      │
+│         sitemap.assetType = other) ∧                                        │
+│     /* Generate robots.txt */                                               │
+│     (∃ robots : ran assets •                                                │
+│         robots.path = "robots.txt" ∧                                        │
+│         robots.assetType = other) ∧                                         │
+│     /* Store in build artifacts */                                          │
+│     buildState'.artifacts.assets = assets                                   │
+│                                                                             │
+│ /* Calculate total size */                                                  │
+│ ∧ buildState'.artifacts.totalSize =                                         │
+│     Σ{a : ran buildState'.artifacts.assets • a.sizeBytes}                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Complete Build
+ * Finalizes the build process
+ */
+┌─ CompleteBuild ───────────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+│ success? : 𝔹                                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ buildState.status = inProgress                                              │
+│ ∧ buildState.currentPhase = finalization                                    │
+│                                                                             │
+│ /* Post-conditions for successful build */                                 │
+│ ∧ (success? = true ⇒                                                        │
+│     buildState'.status = completed ∧                                        │
+│     buildState'.endTime = currentTime ∧                                     │
+│     buildState'.artifacts ≠ null ∧                                          │
+│     #buildState'.errors = 0)                                                │
+│                                                                             │
+│ /* Post-conditions for failed build */                                     │
+│ ∧ (success? = false ⇒                                                       │
+│     buildState'.status = failed ∧                                           │
+│     buildState'.endTime = currentTime ∧                                     │
+│     #buildState'.errors > 0)                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 2: WORKER REQUEST HANDLING OPERATIONS
+ ******************************************************************************/
+
+/* Initialize Worker
+ * Sets up the worker runtime environment
+ */
+┌─ InitializeWorker ────────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+│ redirectsContent? : seq ℂ                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ workerState.requestCount = 0                                                │
+│ ∧ buildState.status = completed                                             │
+│                                                                             │
+│ /* Parse and load redirect rules */                                        │
+│ ∧ workerState'.redirectEvaluator =                                          │
+│     parseRedirectsFile(redirectsContent?)                                   │
+│                                                                             │
+│ /* Initialize environment bindings */                                       │
+│ ∧ workerState'.environment.assetsBinding.directory = "./dist"              │
+│ ∧ workerState'.environment.r2Bucket.bucketName = "vendored-markdown"       │
+│                                                                             │
+│ /* Worker is ready to serve requests */                                    │
+│ ∧ workerState'.requestCount = 0                                             │
+│ ∧ workerState'.errorCount = 0                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Handle Request - Main Entry Point
+ * Processes incoming HTTP request
+ */
+┌─ HandleRequest ───────────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+│ request? : HTTPRequest                                                      │
+│ response! : HTTPResponse                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ buildState.status = completed                                               │
+│                                                                             │
+│ /* Increment request count */                                              │
+│ ∧ workerState'.requestCount = workerState.requestCount + 1                 │
+│                                                                             │
+│ /* Route request based on path */                                          │
+│ ∧ (request?.path = "/markdown.zip" ⇒                                       │
+│     response! = handleVendoredMarkdown(request?)) ∨                         │
+│   (request?.path = "/llms-full.txt" ⇒                                      │
+│     response! = handleLLMSContent(request?)) ∨                              │
+│   (endsWith(request?.path, "/index.md") ∨                                   │
+│     contains(request?.headers("accept"), "text/markdown") ⇒                 │
+│     response! = handleMarkdownConversion(request?)) ∨                       │
+│   (response! = handleStandardRequest(request?))                             │
+│                                                                             │
+│ /* Update error count if response is error */                              │
+│ ∧ response!.statusCode ≥ 500 ⇒                                             │
+│     workerState'.errorCount = workerState.errorCount + 1                    │
+│                                                                             │
+│ /* Update analytics */                                                      │
+│ ∧ response!.status = ok_200 ⇒                                              │
+│     (let path = request?.path •                                             │
+│         analytics'.pageViews(path) =                                        │
+│             (path ∈ dom analytics.pageViews ⇒                              │
+│                 analytics.pageViews(path) + 1 |                             │
+│                 1))                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Handle Vendored Markdown Request
+ * Serves pre-generated markdown from R2
+ */
+┌─ HandleVendoredMarkdown ──────────────────────────────────────────────────┐
+│ ΞEnhancedSystemState                                                        │
+│ request? : HTTPRequest                                                      │
+│ response! : HTTPResponse                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Request is for vendored markdown */                      │
+│ request?.path ∈ {"/markdown.zip", "/llms-full.txt"}                        │
+│                                                                             │
+│ /* Fetch from R2 bucket */                                                  │
+│ ∧ let key = substring(request?.path, 1) •                                  │
+│     key ∈ dom workerState.environment.r2Bucket.objects ⇒                   │
+│         response!.status = ok_200 ∧                                         │
+│         response!.statusCode = 200 ∧                                        │
+│         response!.headers("Content-Type") =                                 │
+│             workerState.environment.r2Bucket.objects(key).contentType ∧     │
+│         response!.body = fetchR2Object(key) |                               │
+│     response!.status = notFound_404 ∧                                       │
+│     response!.statusCode = 404                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Handle Markdown Conversion Request
+ * Converts HTML to markdown on-demand
+ */
+┌─ HandleMarkdownConversion ────────────────────────────────────────────────┐
+│ ΞEnhancedSystemState                                                        │
+│ request? : HTTPRequest                                                      │
+│ response! : HTTPResponse                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Request is for markdown format */                        │
+│ endsWith(request?.path, "/index.md") ∨                                      │
+│ contains(request?.headers("accept"), "text/markdown")                       │
+│                                                                             │
+│ /* Fetch HTML version */                                                    │
+│ ∧ let htmlUrl = replace(request?.url, "index.md", "") •                    │
+│     ∃ htmlResponse : HTTPResponse •                                         │
+│         htmlResponse = fetchAsset(htmlUrl) ∧                                │
+│         (htmlResponse.status = ok_200 ⇒                                     │
+│             /* Convert HTML to Markdown */                                  │
+│             let markdown = htmlToMarkdown(htmlResponse.body) •              │
+│                 markdown ≠ null ⇒                                           │
+│                     response!.status = ok_200 ∧                             │
+│                     response!.statusCode = 200 ∧                            │
+│                     response!.headers("content-type") =                     │
+│                         "text/markdown; charset=utf-8" ∧                    │
+│                     response!.headers("x-robots-tag") = "noindex" ∧         │
+│                     response!.body = markdown |                             │
+│                 response!.status = notFound_404 ∧                           │
+│                 response!.statusCode = 404) |                               │
+│         response! = htmlResponse                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Evaluate Redirects
+ * Checks if request should be redirected
+ */
+┌─ EvaluateRedirects ───────────────────────────────────────────────────────┐
+│ ΞEnhancedSystemState                                                        │
+│ request? : HTTPRequest                                                      │
+│ redirect! : HTTPResponse ∪ {null}                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Check against redirect rules in priority order */                       │
+│ ∃ rule : ran workerState.redirectEvaluator.staticRules ∪                   │
+│          ran workerState.redirectEvaluator.dynamicRules •                   │
+│     (rule.isRegex = true ∧                                                  │
+│         matches(request?.path, rule.sourcePattern)) ∨                       │
+│     (rule.isRegex = false ∧                                                 │
+│         request?.path = rule.sourcePattern) ⇒                               │
+│         redirect!.status = (rule.statusCode = 301 ⇒ redirect_301 |         │
+│                             redirect_302) ∧                                 │
+│         redirect!.statusCode = rule.statusCode ∧                            │
+│         redirect!.headers("Location") = rule.targetUrl |                    │
+│ redirect! = null                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Handle Standard Request
+ * Serves static assets or applies redirects
+ */
+┌─ HandleStandardRequest ───────────────────────────────────────────────────┐
+│ ΞEnhancedSystemState                                                        │
+│ request? : HTTPRequest                                                      │
+│ response! : HTTPResponse                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Try to evaluate redirects first */                                      │
+│ let redirectResponse = evaluateRedirects(request?) •                        │
+│     redirectResponse ≠ null ⇒                                               │
+│         response! = redirectResponse |                                      │
+│     /* No redirect, try with trailing slash */                             │
+│     let trailingSlashUrl = request?.url ⌢ "/" •                            │
+│         let redirectResponse2 =                                             │
+│             evaluateRedirects(makeRequest(trailingSlashUrl)) •              │
+│             redirectResponse2 ≠ null ⇒                                      │
+│                 response! = redirectResponse2 |                             │
+│         /* Serve from assets */                                             │
+│         let assetPath = request?.path •                                     │
+│             assetPath ∈ workerState.environment.assetsBinding.              │
+│                 availablePaths ⇒                                            │
+│                 response!.status = ok_200 ∧                                 │
+│                 response!.statusCode = 200 ∧                                │
+│                 response!.body = fetchAsset(assetPath) |                    │
+│             /* 404 - check for section-specific 404 */                     │
+│             let section = firstSegment(request?.path) •                     │
+│                 let notFoundPath = "/" ⌢ section ⌢ "/404/" •               │
+│                     notFoundPath ∈ workerState.environment.assetsBinding.   │
+│                         availablePaths ⇒                                    │
+│                         response!.status = notFound_404 ∧                   │
+│                         response!.statusCode = 404 ∧                        │
+│                         response!.body = fetchAsset(notFoundPath) |         │
+│                     response!.status = notFound_404 ∧                       │
+│                     response!.statusCode = 404 ∧                            │
+│                     response!.body = "Not Found"                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 3: CACHE OPERATIONS
+ ******************************************************************************/
+
+/* Check Cache
+ * Determines if request can be served from cache
+ */
+┌─ CheckCache ──────────────────────────────────────────────────────────────┐
+│ ΞEnhancedSystemState                                                        │
+│ request? : HTTPRequest                                                      │
+│ cacheHit! : 𝔹                                                               │
+│ cachedResponse! : HTTPResponse ∪ {null}                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ let url = request?.url •                                                    │
+│     url ∈ dom cache.entries ⇒                                              │
+│         let entry = cache.entries(url) •                                    │
+│             currentTime < entry.expiresAt ⇒                                 │
+│                 cacheHit! = true ∧                                          │
+│                 cachedResponse! = entry.response ∧                          │
+│                 cachedResponse!.cacheStatus = hit |                         │
+│             currentTime ≥ entry.expiresAt ⇒                                │
+│                 cacheHit! = false ∧                                         │
+│                 cachedResponse! = null |                                    │
+│     url ∉ dom cache.entries ⇒                                              │
+│         cacheHit! = false ∧                                                 │
+│         cachedResponse! = null                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Update Cache
+ * Stores response in cache
+ */
+┌─ UpdateCache ─────────────────────────────────────────────────────────────┐
+│ ΔEnhancedSystemState                                                        │
+│ request? : HTTPRequest                                                      │
+│ response? : HTTPResponse                                                    │
+│ ttl? : ℤ                                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-conditions */                                                        │
+│ response?.status = ok_200                                                   │
+│ ∧ ttl? > 0                                                                  │
+│                                                                             │
+│ /* Create cache entry */                                                    │
+│ ∧ let entry = {                                                             │
+│     url ↦ request?.url,                                                     │
+│     response ↦ response?,                                                   │
+│     cachedAt ↦ currentTime,                                                 │
+│     expiresAt ↦ currentTime + ttl?,                                         │
+│     hitCount ↦ 0                                                            │
+│   } •                                                                       │
+│     /* Add to cache if space available */                                   │
+│     cache'.currentSize + #response?.body ≤ cache.maxSize ⇒                 │
+│         cache'.entries = cache.entries ∪ {entry} ∧                          │
+│         cache'.currentSize = cache.currentSize + #response?.body |          │
+│     /* Evict old entries if needed */                                       │
+│     cache'.entries = evictOldEntries(cache.entries) ∪ {entry}              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 4: QUERY OPERATIONS
+ ******************************************************************************/
+
+/* Search Content
+ * Full-text search across documentation
+ */
+┌─ SearchContent ───────────────────────────────────────────────────────────┐
+│ ΞEnhancedSystemState                                                        │
+│ query? : seq ℂ                                                              │
+│ results! : seq DocsPage                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Pre-condition: Query is non-empty */                                    │
+│ #query? > 0                                                                 │
+│                                                                             │
+│ /* Search in page titles, descriptions, and content */                     │
+│ ∧ results! = {                                                              │
+│     page : ran contentRepo.docs.pages |                                     │
+│         contains(toLowerCase(page.title), toLowerCase(query?)) ∨            │
+│         (page.description ≠ null ∧                                          │
+│             contains(toLowerCase(page.description), toLowerCase(query?))) ∨ │
+│         contains(toLowerCase(page.content), toLowerCase(query?))            │
+│   }                                                                         │
+│                                                                             │
+│ /* Record search query for analytics */                                    │
+│ ∧ analytics'.searchQueries = analytics.searchQueries ⌢ ⟨query?⟩           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Get Navigation Tree
+ * Builds hierarchical navigation structure
+ */
+┌─ GetNavigationTree ───────────────────────────────────────────────────────┐
+│ ΞEnhancedSystemState                                                        │
+│ tree! : seq(FilePath × seq ℂ × ℤ)                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Build tree from pages with sidebar configuration */                     │
+│ tree! = sortBy(                                                             │
+│     {(page.filePath, page.title, page.sidebar.order) |                      │
+│         page : ran contentRepo.docs.pages •                                 │
+│         page.sidebar ≠ null ∧                                               │
+│         page.sidebar.hidden = false},                                       │
+│     λ x, y • x.3 < y.3  /* Sort by order */                                │
+│ )                                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * END OF OPERATIONS SPECIFICATION
+ ******************************************************************************/

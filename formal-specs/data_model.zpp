@@ -1,0 +1,514 @@
+/*******************************************************************************
+ * DATA MODEL FORMAL SPECIFICATION
+ * System: Cloudflare Documentation Platform
+ * Language: Z++ (Z Notation Extensions)
+ * 
+ * This specification formally models the data layer of the Cloudflare 
+ * documentation system, including content schemas, MDX frontmatter structures,
+ * and data collection types.
+ ******************************************************************************/
+
+/*******************************************************************************
+ * PART 1: BASIC TYPES AND ENUMERATIONS
+ ******************************************************************************/
+
+/* Content Type Enumeration
+ * Defines the purpose and classification of documentation pages
+ */
+[ContentType] ::= changelog | changelogEntry | configuration | concept | 
+                  designGuide | example | faq | getStarted | howTo | 
+                  integrationGuide | implementationGuide | learningUnit | 
+                  navigation | overview | reference | referenceArchitecture | 
+                  referenceArchitectureDiagram | releaseNotes | troubleshooting | 
+                  tutorial | video
+
+/* Difficulty Level Enumeration
+ * Classifies content complexity for readers
+ */
+[Difficulty] ::= Beginner | Intermediate | Advanced
+
+/* Sidebar Badge Types
+ * Visual indicators in navigation
+ */
+[BadgeType] ::= new | updated | beta | deprecated
+
+/* Banner Type Enumeration
+ * Alert/notification styling
+ */
+[BannerType] ::= default | note | tip | caution | danger
+
+/* Icon Type Enumeration
+ * Visual icons for sidebar entries
+ */
+[IconType] ::= simple_icon | custom_icon
+
+/*******************************************************************************
+ * PART 2: PRIMITIVE DATA STRUCTURES
+ ******************************************************************************/
+
+/* ISO Date String
+ * Represents dates in ISO 8601 format: YYYY-MM-DD
+ */
+ISODateString == seq ℂ
+  where #ISODateString = 10 ∧
+        ISODateString matches /^\d{4}-\d{2}-\d{2}$/
+
+/* URL String
+ * Represents valid HTTP/HTTPS URLs
+ */
+URLString == seq ℂ
+  where URLString matches /^https?:\/\/.+/
+
+/* File Path
+ * Represents file system paths (absolute or relative)
+ */
+FilePath == seq ℂ
+
+/* Markdown Content
+ * Raw markdown/MDX content as character sequence
+ */
+MarkdownContent == seq ℂ
+
+/* Product Identifier
+ * References to product definitions
+ */
+ProductId == seq ℂ
+
+/*******************************************************************************
+ * PART 3: FRONTMATTER SCHEMA COMPONENTS
+ ******************************************************************************/
+
+/* Sidebar Icon Configuration
+ * Defines icon display in navigation sidebar
+ */
+┌─ SidebarIcon ─────────────────────────────────────────────────────────────┐
+│ iconType : IconType                                                         │
+│ iconName : seq ℂ                                                            │
+│ iconSet : seq ℂ                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Sidebar Configuration
+ * Controls navigation sidebar behavior and appearance
+ */
+┌─ SidebarConfig ───────────────────────────────────────────────────────────┐
+│ order : ℤ                                                                   │
+│ badge : BadgeType ∪ {null}                                                 │
+│ hidden : 𝔹                                                                  │
+│ icon : SidebarIcon ∪ {null}                                               │
+│ label : seq ℂ ∪ {null}                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ order ≥ 0                                                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Dismissible Banner Configuration
+ * Allows users to hide banners temporarily
+ */
+┌─ DismissibleConfig ───────────────────────────────────────────────────────┐
+│ id : seq ℂ                                                                  │
+│ days : ℤ                                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #id > 0 ∧ days > 0 ∧ days ≤ 365                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Banner Configuration
+ * Page-level alerts and notifications
+ */
+┌─ BannerConfig ────────────────────────────────────────────────────────────┐
+│ content : seq ℂ                                                             │
+│ bannerType : BannerType                                                     │
+│ dismissible : DismissibleConfig ∪ {null}                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #content > 0                                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Spotlight Author Details
+ * Attribution for contributed content
+ */
+┌─ SpotlightAuthor ─────────────────────────────────────────────────────────┐
+│ author : seq ℂ                                                              │
+│ authorBioLink : URLString                                                   │
+│ authorBioSource : seq ℂ                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #author > 0                                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Head Configuration
+ * Custom HTML head elements for a page
+ */
+┌─ HeadConfig ──────────────────────────────────────────────────────────────┐
+│ tag : seq ℂ                                                                 │
+│ attrs : seq ℂ ↦ seq ℂ                                                      │
+│ content : seq ℂ ∪ {null}                                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 4: BASE SCHEMA
+ * Foundation schema extended by all content types
+ ******************************************************************************/
+
+┌─ BaseSchema ──────────────────────────────────────────────────────────────┐
+│ title : seq ℂ                                                               │
+│ description : seq ℂ ∪ {null}                                               │
+│ pcxContentType : ContentType ∪ {null}                                      │
+│ tags : ℙ(seq ℂ)                                                            │
+│ products : ℙ(ProductId)                                                     │
+│ sidebar : SidebarConfig ∪ {null}                                           │
+│ banner : BannerConfig ∪ {null}                                             │
+│ previewImage : FilePath ∪ {null}                                           │
+│ difficulty : Difficulty ∪ {null}                                           │
+│ reviewed : ISODateString ∪ {null}                                          │
+│ spotlight : SpotlightAuthor ∪ {null}                                       │
+│ summary : seq ℂ ∪ {null}                                                   │
+│ noindex : 𝔹                                                                 │
+│ chatbotDeprioritize : 𝔹                                                     │
+│ hideChildren : 𝔹                                                            │
+│ externalLink : URLString ∪ {null}                                          │
+│ feedback : 𝔹                                                                │
+│ head : seq HeadConfig                                                       │
+│ releaseNotesFileName : seq(seq ℂ)                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Invariants */                                                            │
+│ #title > 0                                                                  │
+│ ∧ (description ≠ null ⇒ #description > 0)                                 │
+│ ∧ (externalLink ≠ null ⇒ hideChildren = true)                             │
+│ ∧ (noindex = true ⇒ chatbotDeprioritize = true)                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 5: CONTENT COLLECTION SCHEMAS
+ ******************************************************************************/
+
+/* Documentation Page Schema
+ * Primary documentation content type
+ */
+┌─ DocsPage ────────────────────────────────────────────────────────────────┐
+│ BaseSchema                                                                  │
+│ content : MarkdownContent                                                   │
+│ slug : seq ℂ                                                                │
+│ filePath : FilePath                                                         │
+│ lastModified : ISODateString ∪ {null}                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #content > 0                                                                │
+│ ∧ #slug > 0                                                                 │
+│ ∧ slug matches /^[a-z0-9\-\/]+$/                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Changelog Entry Schema
+ * Product changelog entries
+ */
+┌─ ChangelogEntry ──────────────────────────────────────────────────────────┐
+│ title : seq ℂ                                                               │
+│ publishDate : ISODateString                                                 │
+│ productArea : seq ℂ                                                         │
+│ content : MarkdownContent                                                   │
+│ link : URLString ∪ {null}                                                  │
+│ scheduled : 𝔹                                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #title > 0                                                                  │
+│ ∧ #productArea > 0                                                          │
+│ ∧ #content > 0                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Glossary Term Schema
+ * Technical term definitions
+ */
+┌─ GlossaryTerm ────────────────────────────────────────────────────────────┐
+│ term : seq ℂ                                                                │
+│ definition : seq ℂ                                                          │
+│ relatedTerms : ℙ(seq ℂ)                                                    │
+│ productScope : ℙ(ProductId)                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #term > 0                                                                   │
+│ ∧ #definition > 0                                                           │
+│ ∧ term ∉ relatedTerms                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Learning Path Step
+ * Individual step in a learning path
+ */
+┌─ LearningPathStep ────────────────────────────────────────────────────────┐
+│ title : seq ℂ                                                               │
+│ slug : seq ℂ                                                                │
+│ order : ℤ                                                                   │
+│ description : seq ℂ                                                         │
+│ duration : ℤ                                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #title > 0                                                                  │
+│ ∧ #slug > 0                                                                 │
+│ ∧ order > 0                                                                 │
+│ ∧ duration > 0 /* Duration in minutes */                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Learning Path Schema
+ * Structured learning content
+ */
+┌─ LearningPath ────────────────────────────────────────────────────────────┐
+│ title : seq ℂ                                                               │
+│ pathId : seq ℂ                                                              │
+│ description : seq ℂ                                                         │
+│ difficulty : Difficulty                                                     │
+│ steps : seq LearningPathStep                                                │
+│ products : ℙ(ProductId)                                                     │
+│ estimatedTime : ℤ                                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #title > 0                                                                  │
+│ ∧ #pathId > 0                                                               │
+│ ∧ #steps > 0                                                                │
+│ ∧ (∀ i : 1..#steps • steps(i).order = i)                                  │
+│ ∧ estimatedTime = Σ{s : ran steps • s.duration}                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Compatibility Flag Schema
+ * Cloudflare Workers compatibility flags
+ */
+┌─ CompatibilityFlag ───────────────────────────────────────────────────────┐
+│ flagName : seq ℂ                                                            │
+│ description : seq ℂ                                                         │
+│ enableDate : ISODateString                                                  │
+│ defaultDate : ISODateString ∪ {null}                                       │
+│ content : MarkdownContent                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #flagName > 0                                                               │
+│ ∧ #description > 0                                                          │
+│ ∧ (defaultDate ≠ null ⇒ defaultDate ≥ enableDate)                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* API Field Definition Schema
+ * API reference field metadata
+ */
+┌─ APIFieldDefinition ──────────────────────────────────────────────────────┐
+│ fieldName : seq ℂ                                                           │
+│ fieldType : seq ℂ                                                           │
+│ required : 𝔹                                                                │
+│ description : seq ℂ                                                         │
+│ defaultValue : seq ℂ ∪ {null}                                              │
+│ examples : seq(seq ℂ)                                                      │
+│ constraints : seq ℂ ∪ {null}                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #fieldName > 0                                                              │
+│ ∧ #fieldType > 0                                                            │
+│ ∧ #description > 0                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Workers AI Model Schema
+ * AI model catalog entries
+ */
+┌─ WorkersAIModel ──────────────────────────────────────────────────────────┐
+│ modelId : seq ℂ                                                             │
+│ modelName : seq ℂ                                                           │
+│ taskType : seq ℂ                                                            │
+│ description : seq ℂ                                                         │
+│ properties : seq ℂ ↦ seq ℂ                                                 │
+│ tags : ℙ(seq ℂ)                                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #modelId > 0                                                                │
+│ ∧ #modelName > 0                                                            │
+│ ∧ #taskType > 0                                                             │
+│ ∧ modelId matches /^@cf\/[a-z0-9\-]+$/                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Video Content Schema
+ * Video tutorial metadata
+ */
+┌─ VideoContent ────────────────────────────────────────────────────────────┐
+│ videoId : seq ℂ                                                             │
+│ title : seq ℂ                                                               │
+│ description : seq ℂ                                                         │
+│ url : URLString                                                             │
+│ duration : ℤ                                                                │
+│ thumbnailUrl : URLString                                                    │
+│ products : ℙ(ProductId)                                                     │
+│ publishDate : ISODateString                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #videoId > 0                                                                │
+│ ∧ #title > 0                                                                │
+│ ∧ duration > 0 /* Duration in seconds */                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Release Notes Schema
+ * Product release documentation
+ */
+┌─ ReleaseNote ─────────────────────────────────────────────────────────────┐
+│ version : seq ℂ                                                             │
+│ releaseDate : ISODateString                                                 │
+│ product : ProductId                                                         │
+│ changes : seq ℂ                                                             │
+│ breakingChanges : seq ℂ                                                     │
+│ deprecations : seq ℂ                                                        │
+│ migrations : seq ℂ                                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #version > 0                                                                │
+│ ∧ version matches /^\d+\.\d+\.\d+(-[a-z0-9]+)?$/                          │
+│ ∧ #changes > 0                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 6: CONTENT COLLECTION AGGREGATES
+ ******************************************************************************/
+
+/* Documentation Collection
+ * Complete set of documentation pages
+ */
+┌─ DocsCollection ──────────────────────────────────────────────────────────┐
+│ pages : seq ℂ ↦ DocsPage                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* All slugs are unique */                                                 │
+│ ∀ p1, p2 : ran pages • p1.slug = p2.slug ⇒ p1 = p2                       │
+│                                                                             │
+│ /* No circular external links */                                           │
+│ ∧ ∀ p : ran pages • p.externalLink ≠ null ⇒                               │
+│     p.externalLink ∉ {q.slug | q : ran pages}                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Changelog Collection
+ * Complete set of changelog entries
+ */
+┌─ ChangelogCollection ─────────────────────────────────────────────────────┐
+│ entries : seq ChangelogEntry                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Entries are ordered by publish date (newest first) */                   │
+│ ∀ i : 1..#entries-1 •                                                      │
+│     entries(i).publishDate ≥ entries(i+1).publishDate                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Glossary Collection
+ * Complete set of term definitions
+ */
+┌─ GlossaryCollection ──────────────────────────────────────────────────────┐
+│ terms : seq ℂ ↦ GlossaryTerm                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Term names match keys */                                                │
+│ ∀ termName : dom terms •                                                    │
+│     terms(termName).term = termName                                         │
+│                                                                             │
+│ /* Related terms reference valid terms */                                  │
+│ ∧ ∀ t : ran terms • t.relatedTerms ⊆ dom terms                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Learning Paths Collection
+ * Complete set of learning paths
+ */
+┌─ LearningPathsCollection ─────────────────────────────────────────────────┐
+│ paths : seq ℂ ↦ LearningPath                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Path IDs match keys */                                                  │
+│ ∀ pathId : dom paths • paths(pathId).pathId = pathId                      │
+│                                                                             │
+│ /* All step slugs reference valid documentation pages */                   │
+│ ∧ ∃ docsCollection : DocsCollection •                                      │
+│     ∀ p : ran paths • ∀ s : ran p.steps •                                 │
+│         s.slug ∈ {page.slug | page : ran docsCollection.pages}            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Product Definitions Collection
+ * Metadata about Cloudflare products
+ */
+┌─ ProductDefinition ───────────────────────────────────────────────────────┐
+│ productId : ProductId                                                       │
+│ name : seq ℂ                                                                │
+│ category : seq ℂ                                                            │
+│ icon : seq ℂ ∪ {null}                                                      │
+│ description : seq ℂ                                                         │
+│ docsPath : seq ℂ                                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #productId > 0                                                              │
+│ ∧ #name > 0                                                                 │
+│ ∧ #docsPath > 0                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ ProductsCollection ──────────────────────────────────────────────────────┐
+│ products : ProductId ↦ ProductDefinition                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Product IDs match keys */                                               │
+│ ∀ id : dom products • products(id).productId = id                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 7: CONTENT REPOSITORY STATE
+ * Aggregate state of all content collections
+ ******************************************************************************/
+
+┌─ ContentRepository ───────────────────────────────────────────────────────┐
+│ docs : DocsCollection                                                       │
+│ changelog : ChangelogCollection                                             │
+│ glossary : GlossaryCollection                                               │
+│ learningPaths : LearningPathsCollection                                     │
+│ products : ProductsCollection                                               │
+│ compatibilityFlags : seq ℂ ↦ CompatibilityFlag                            │
+│ apiFields : seq ℂ ↦ APIFieldDefinition                                     │
+│ workersAiModels : seq ℂ ↦ WorkersAIModel                                   │
+│ videos : seq VideoContent                                                   │
+│ releaseNotes : seq ReleaseNote                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Product references are valid across all collections */                  │
+│ (∀ p : ran docs.pages • p.products ⊆ dom products.products)               │
+│ ∧ (∀ t : ran glossary.terms • t.productScope ⊆ dom products.products)     │
+│ ∧ (∀ lp : ran learningPaths.paths •                                        │
+│       lp.products ⊆ dom products.products)                                 │
+│ ∧ (∀ v : ran videos • v.products ⊆ dom products.products)                 │
+│ ∧ (∀ rn : ran releaseNotes • rn.product ∈ dom products.products)          │
+│                                                                             │
+│ /* Content size constraints */                                             │
+│ ∧ #(ran docs.pages) ≥ 1                                                    │
+│ ∧ #(dom products.products) ≥ 1                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 8: VALIDATION OPERATIONS
+ * Operations for validating content integrity
+ ******************************************************************************/
+
+/* Validate Documentation Page
+ * Pre-condition: Page schema is well-formed
+ * Post-condition: Returns validation result
+ */
+┌─ ValidateDocsPage ────────────────────────────────────────────────────────┐
+│ ΞContentRepository                                                          │
+│ page? : DocsPage                                                            │
+│ valid! : 𝔹                                                                  │
+│ errors! : ℙ(seq ℂ)                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ valid! = (                                                                  │
+│     page?.title ≠ "" ∧                                                      │
+│     page?.content ≠ "" ∧                                                    │
+│     page?.products ⊆ dom products.products ∧                               │
+│     (page?.sidebar ≠ null ⇒ page?.sidebar.order ≥ 0)                      │
+│ )                                                                           │
+│                                                                             │
+│ ∧ errors! = {                                                               │
+│     e : seq ℂ |                                                             │
+│         (page?.title = "" ⇒ e = "Empty title") ∨                           │
+│         (page?.content = "" ⇒ e = "Empty content") ∨                       │
+│         (¬(page?.products ⊆ dom products.products) ⇒                       │
+│             e = "Invalid product reference")                                │
+│   }                                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Find Page by Slug
+ * Query operation to retrieve page by identifier
+ */
+┌─ FindPageBySlug ──────────────────────────────────────────────────────────┐
+│ ΞContentRepository                                                          │
+│ slug? : seq ℂ                                                               │
+│ page! : DocsPage ∪ {null}                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ slug? ∈ dom docs.pages ⇒                                                   │
+│     page! = docs.pages(slug?)                                              │
+│ ∧ slug? ∉ dom docs.pages ⇒                                                 │
+│     page! = null                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Get Product Pages
+ * Retrieve all pages for a specific product
+ */
+┌─ GetProductPages ─────────────────────────────────────────────────────────┐
+│ ΞContentRepository                                                          │
+│ productId? : ProductId                                                      │
+│ pages! : ℙ(DocsPage)                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ pages! = {p : ran docs.pages | productId? ∈ p.products}                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * END OF DATA MODEL SPECIFICATION
+ ******************************************************************************/
