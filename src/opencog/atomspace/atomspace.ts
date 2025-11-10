@@ -92,7 +92,7 @@ export class AtomSpace {
     const handle = generateHandle();
     const node: Node = {
       handle,
-      type,
+      type: type as any, // Cast to satisfy type constraint
       name,
       tv: tv ?? createDefaultTruthValue(),
       av: av ?? createDefaultAttentionValue(),
@@ -131,7 +131,7 @@ export class AtomSpace {
     const handle = generateHandle();
     const link: Link = {
       handle,
-      type,
+      type: type as any, // Cast to satisfy type constraint
       name: "",
       outgoing,
       arity: outgoing.length,
@@ -160,7 +160,7 @@ export class AtomSpace {
     const nameMatches = this.nameIndex.get(name);
     if (!nameMatches) return null;
     
-    for (const handle of nameMatches) {
+    for (const handle of Array.from(nameMatches)) {
       const atom = this.atoms.get(handle);
       if (atom && atom.type === type) {
         atom.lastAccessed = Date.now();
@@ -178,7 +178,7 @@ export class AtomSpace {
     const typeMatches = this.typeIndex.get(type);
     if (!typeMatches) return null;
     
-    for (const handle of typeMatches) {
+    for (const handle of Array.from(typeMatches)) {
       const atom = this.atoms.get(handle) as Link;
       if (atom && this.matchesOutgoing(atom, outgoing)) {
         atom.lastAccessed = Date.now();
@@ -261,7 +261,7 @@ export class AtomSpace {
     
     // Decay attention values
     if (this.config.enableAttentionDecay) {
-      for (const atom of this.atoms.values()) {
+      for (const atom of Array.from(this.atoms.values())) {
         atom.av = decayAttentionValue(atom.av, this.config.attentionDecayRate);
       }
     }
@@ -301,7 +301,7 @@ export class AtomSpace {
     let totalSTI = 0;
     let maxSTI = 0;
     
-    for (const atom of this.atoms.values()) {
+    for (const atom of Array.from(this.atoms.values())) {
       if ("outgoing" in atom) {
         linkCount++;
       } else {
