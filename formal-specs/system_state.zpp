@@ -1,0 +1,462 @@
+/*******************************************************************************
+ * SYSTEM STATE FORMAL SPECIFICATION
+ * System: Cloudflare Documentation Platform
+ * Language: Z++ (Z Notation Extensions)
+ * 
+ * This specification formally models the overall system state including:
+ * - Build-time state (Astro compilation)
+ * - Runtime state (Cloudflare Workers)
+ * - Content management state
+ * - Cache and session management
+ ******************************************************************************/
+
+/* Import data model types */
+given [ContentRepository, DocsPage, ChangelogEntry, GlossaryTerm]
+given [FilePath, URLString, ISODateString, MarkdownContent]
+
+/*******************************************************************************
+ * PART 1: BUILD SYSTEM STATE
+ ******************************************************************************/
+
+/* Build Status Enumeration */
+[BuildStatus] ::= notStarted | inProgress | completed | failed
+
+/* Build Phase Enumeration */
+[BuildPhase] ::= initialization | contentLoading | schemaValidation | 
+                 markdownProcessing | codeGeneration | bundling | 
+                 assetOptimization | finalization
+
+/* Asset Type Enumeration */
+[AssetType] ::= html | css | javascript | image | font | other
+
+/* Build Configuration
+ * Controls build process behavior
+ */
+┌─ BuildConfig ─────────────────────────────────────────────────────────────┐
+│ nodeMemoryLimit : ℤ                                                         │
+│ enableLinkCheck : 𝔹                                                         │
+│ enableLastModInSitemap : 𝔹                                                  │
+│ siteUrl : URLString                                                         │
+│ serverPort : ℤ                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ nodeMemoryLimit ≥ 4096 /* Minimum 4GB */                                   │
+│ ∧ serverPort > 0 ∧ serverPort < 65536                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Static Asset
+ * Represents a generated build artifact
+ */
+┌─ StaticAsset ─────────────────────────────────────────────────────────────┐
+│ path : FilePath                                                             │
+│ assetType : AssetType                                                       │
+│ sizeBytes : ℤ                                                               │
+│ hash : seq ℂ                                                                │
+│ sourceFile : FilePath ∪ {null}                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #path > 0                                                                   │
+│ ∧ sizeBytes ≥ 0                                                             │
+│ ∧ #hash = 64 /* SHA-256 hash */                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Build Artifact Set
+ * Complete set of generated build outputs
+ */
+┌─ BuildArtifacts ──────────────────────────────────────────────────────────┐
+│ assets : FilePath ↦ StaticAsset                                            │
+│ htmlPages : ℙ(FilePath)                                                    │
+│ sitemap : FilePath                                                          │
+│ robotsTxt : FilePath                                                        │
+│ redirectsFile : FilePath                                                    │
+│ totalSize : ℤ                                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* All paths in assets are unique */                                       │
+│ dom assets = {a.path | a : ran assets}                                     │
+│                                                                             │
+│ /* HTML pages are subset of all assets */                                  │
+│ ∧ htmlPages ⊆ dom assets                                                   │
+│ ∧ (∀ p : htmlPages • assets(p).assetType = html)                          │
+│                                                                             │
+│ /* Total size is sum of all assets */                                      │
+│ ∧ totalSize = Σ{a : ran assets • a.sizeBytes}                             │
+│                                                                             │
+│ /* Required files exist */                                                 │
+│ ∧ sitemap ∈ dom assets                                                     │
+│ ∧ robotsTxt ∈ dom assets                                                   │
+│ ∧ redirectsFile ∈ dom assets                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Markdown AST Node
+ * Abstract Syntax Tree node for markdown processing
+ */
+┌─ ASTNode ─────────────────────────────────────────────────────────────────┐
+│ nodeType : seq ℂ                                                            │
+│ position : ℤ × ℤ                                                            │
+│ children : seq ASTNode                                                      │
+│ properties : seq ℂ ↦ seq ℂ                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #nodeType > 0                                                               │
+│ ∧ let (line, col) = position • line > 0 ∧ col ≥ 0                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Plugin Execution Context
+ * State during markdown/rehype plugin execution
+ */
+┌─ PluginContext ───────────────────────────────────────────────────────────┐
+│ currentFile : FilePath                                                      │
+│ ast : ASTNode                                                               │
+│ metadata : seq ℂ ↦ seq ℂ                                                   │
+│ errors : seq(seq ℂ)                                                        │
+│ warnings : seq(seq ℂ)                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #currentFile > 0                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Build Process State
+ * Current state of the build pipeline
+ */
+┌─ BuildProcessState ───────────────────────────────────────────────────────┐
+│ status : BuildStatus                                                        │
+│ currentPhase : BuildPhase                                                   │
+│ config : BuildConfig                                                        │
+│ contentRepo : ContentRepository                                             │
+│ artifacts : BuildArtifacts ∪ {null}                                        │
+│ pluginContexts : seq PluginContext                                          │
+│ startTime : ℤ                                                               │
+│ endTime : ℤ ∪ {null}                                                        │
+│ errors : seq(seq ℂ)                                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Status transitions are valid */                                         │
+│ (status = notStarted ⇒ artifacts = null ∧ #pluginContexts = 0)           │
+│ ∧ (status = inProgress ⇒ endTime = null)                                  │
+│ ∧ (status ∈ {completed, failed} ⇒ endTime ≠ null)                         │
+│ ∧ (status = completed ⇒ artifacts ≠ null ∧ #errors = 0)                   │
+│ ∧ (status = failed ⇒ #errors > 0)                                          │
+│                                                                             │
+│ /* Time constraints */                                                      │
+│ ∧ startTime > 0                                                             │
+│ ∧ (endTime ≠ null ⇒ endTime ≥ startTime)                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 2: WORKER RUNTIME STATE
+ ******************************************************************************/
+
+/* Request Method Enumeration */
+[HTTPMethod] ::= GET | POST | PUT | DELETE | PATCH | HEAD | OPTIONS
+
+/* HTTP Status Code */
+[HTTPStatus] ::= ok_200 | redirect_301 | redirect_302 | notFound_404 | 
+                 error_500 | other
+
+/* Request Origin Enumeration */
+[RequestOrigin] ::= browser | api | bot | internal
+
+/* Cache Status Enumeration */
+[CacheStatus] ::= hit | miss | expired | bypass | revalidated
+
+/* HTTP Headers
+ * Key-value pairs for HTTP headers
+ */
+HTTPHeaders == seq ℂ ↦ seq ℂ
+
+/* HTTP Request State
+ * Incoming request to the worker
+ */
+┌─ HTTPRequest ─────────────────────────────────────────────────────────────┐
+│ method : HTTPMethod                                                         │
+│ url : URLString                                                             │
+│ path : seq ℂ                                                                │
+│ queryParams : seq ℂ ↦ seq(seq ℂ)                                          │
+│ headers : HTTPHeaders                                                       │
+│ body : seq ℂ ∪ {null}                                                      │
+│ timestamp : ℤ                                                               │
+│ clientIP : seq ℂ                                                            │
+│ origin : RequestOrigin                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #path > 0 ∧ path(1) = '/'                                                  │
+│ ∧ timestamp > 0                                                             │
+│ ∧ #clientIP > 0                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* HTTP Response State
+ * Outgoing response from the worker
+ */
+┌─ HTTPResponse ────────────────────────────────────────────────────────────┐
+│ status : HTTPStatus                                                         │
+│ statusCode : ℤ                                                              │
+│ headers : HTTPHeaders                                                       │
+│ body : seq ℂ ∪ {null}                                                      │
+│ cacheStatus : CacheStatus                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ statusCode ≥ 100 ∧ statusCode < 600                                        │
+│ ∧ (status = ok_200 ⇒ statusCode = 200)                                    │
+│ ∧ (status = redirect_301 ⇒ statusCode = 301 ∧                             │
+│       "Location" ∈ dom headers)                                             │
+│ ∧ (status = redirect_302 ⇒ statusCode = 302 ∧                             │
+│       "Location" ∈ dom headers)                                             │
+│ ∧ (status = notFound_404 ⇒ statusCode = 404)                              │
+│ ∧ (status = error_500 ⇒ statusCode = 500)                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Redirect Rule
+ * URL rewrite and redirect configuration
+ */
+┌─ RedirectRule ────────────────────────────────────────────────────────────┐
+│ sourcePattern : seq ℂ                                                       │
+│ targetUrl : seq ℂ                                                           │
+│ statusCode : ℤ                                                              │
+│ isRegex : 𝔹                                                                 │
+│ priority : ℤ                                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #sourcePattern > 0                                                          │
+│ ∧ #targetUrl > 0                                                            │
+│ ∧ statusCode ∈ {301, 302, 307, 308}                                       │
+│ ∧ priority > 0                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Redirect Evaluator State
+ * Runtime redirect rule evaluation system
+ */
+┌─ RedirectEvaluator ───────────────────────────────────────────────────────┐
+│ staticRules : seq RedirectRule                                              │
+│ dynamicRules : seq RedirectRule                                             │
+│ maxStaticRules : ℤ                                                          │
+│ maxDynamicRules : ℤ                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #staticRules ≤ maxStaticRules                                               │
+│ ∧ #dynamicRules ≤ maxDynamicRules                                           │
+│ ∧ maxStaticRules = 10000                                                    │
+│ ∧ maxDynamicRules = 2000                                                    │
+│                                                                             │
+│ /* Rules are sorted by priority (highest first) */                         │
+│ ∧ (∀ i : 1..#staticRules-1 •                                               │
+│       staticRules(i).priority ≥ staticRules(i+1).priority)                 │
+│ ∧ (∀ i : 1..#dynamicRules-1 •                                              │
+│       dynamicRules(i).priority ≥ dynamicRules(i+1).priority)               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* R2 Object Reference
+ * Reference to object in Cloudflare R2 storage
+ */
+┌─ R2Object ────────────────────────────────────────────────────────────────┐
+│ key : seq ℂ                                                                 │
+│ sizeBytes : ℤ                                                               │
+│ etag : seq ℂ                                                                │
+│ uploaded : ℤ                                                                │
+│ contentType : seq ℂ                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #key > 0                                                                    │
+│ ∧ sizeBytes ≥ 0                                                             │
+│ ∧ #etag > 0                                                                 │
+│ ∧ uploaded > 0                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* R2 Bucket State
+ * Cloudflare R2 bucket binding
+ */
+┌─ R2Bucket ────────────────────────────────────────────────────────────────┐
+│ bucketName : seq ℂ                                                          │
+│ objects : seq ℂ ↦ R2Object                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #bucketName > 0                                                             │
+│ ∧ bucketName = "vendored-markdown"                                         │
+│                                                                             │
+│ /* All object keys in bucket are unique */                                 │
+│ ∧ ∀ obj : ran objects • obj.key ∈ dom objects                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Assets Binding State
+ * Reference to static build artifacts in production
+ */
+┌─ AssetsBinding ───────────────────────────────────────────────────────────┐
+│ directory : FilePath                                                        │
+│ availablePaths : ℙ(FilePath)                                               │
+│ notFoundHandling : seq ℂ                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #directory > 0                                                              │
+│ ∧ directory = "./dist"                                                      │
+│ ∧ notFoundHandling = "404-page"                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Worker Environment Bindings
+ * Runtime bindings available to the worker
+ */
+┌─ WorkerEnvironment ───────────────────────────────────────────────────────┐
+│ assetsBinding : AssetsBinding                                               │
+│ r2Bucket : R2Bucket                                                         │
+│ secrets : seq ℂ ↦ seq ℂ                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Secrets are never empty strings */                                      │
+│ ∀ s : ran secrets • #s > 0                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Worker Execution Context
+ * State during a single worker request execution
+ */
+┌─ WorkerContext ───────────────────────────────────────────────────────────┐
+│ request : HTTPRequest                                                       │
+│ environment : WorkerEnvironment                                             │
+│ redirectEvaluator : RedirectEvaluator                                       │
+│ executionStartTime : ℤ                                                      │
+│ logs : seq(seq ℂ)                                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ executionStartTime > 0                                                      │
+│ ∧ executionStartTime ≥ request.timestamp                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Worker Runtime State
+ * Complete state of the Cloudflare Worker at runtime
+ */
+┌─ WorkerRuntimeState ──────────────────────────────────────────────────────┐
+│ activeContexts : seq WorkerContext                                          │
+│ environment : WorkerEnvironment                                             │
+│ redirectEvaluator : RedirectEvaluator                                       │
+│ requestCount : ℤ                                                            │
+│ errorCount : ℤ                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ requestCount ≥ 0                                                            │
+│ ∧ errorCount ≥ 0                                                            │
+│ ∧ errorCount ≤ requestCount                                                │
+│ ∧ requestCount = #activeContexts + /* completed requests */                │
+│     #{ctx : ran activeContexts • true}                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 3: COMPLETE SYSTEM STATE
+ ******************************************************************************/
+
+/* Deployment Stage Enumeration */
+[DeploymentStage] ::= development | staging | production
+
+/* System State
+ * Top-level state encompassing all subsystems
+ */
+┌─ SystemState ─────────────────────────────────────────────────────────────┐
+│ stage : DeploymentStage                                                     │
+│ buildState : BuildProcessState                                              │
+│ workerState : WorkerRuntimeState                                            │
+│ contentRepo : ContentRepository                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Content repository is consistent across build and runtime */            │
+│ buildState.contentRepo = contentRepo                                        │
+│                                                                             │
+│ /* In production, build must be completed */                               │
+│ ∧ (stage = production ⇒                                                    │
+│       buildState.status = completed ∧                                       │
+│       buildState.artifacts ≠ null)                                          │
+│                                                                             │
+│ /* In development, worker may not be deployed */                           │
+│ ∧ (stage = development ⇒                                                   │
+│       workerState.requestCount = 0 ∨                                        │
+│       buildState.status = inProgress)                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 4: CACHE AND SESSION STATE
+ ******************************************************************************/
+
+/* Browser Cache Entry
+ * Cached response in browser/CDN
+ */
+┌─ CacheEntry ──────────────────────────────────────────────────────────────┐
+│ url : URLString                                                             │
+│ response : HTTPResponse                                                     │
+│ cachedAt : ℤ                                                                │
+│ expiresAt : ℤ                                                               │
+│ hitCount : ℤ                                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ cachedAt > 0                                                                │
+│ ∧ expiresAt > cachedAt                                                      │
+│ ∧ hitCount ≥ 0                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Cache State
+ * System-wide cache management
+ */
+┌─ CacheState ──────────────────────────────────────────────────────────────┐
+│ entries : URLString ↦ CacheEntry                                           │
+│ maxSize : ℤ                                                                 │
+│ currentSize : ℤ                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ currentSize ≤ maxSize                                                       │
+│ ∧ currentSize = Σ{e : ran entries • #e.response.body}                     │
+│                                                                             │
+│ /* All cache entry URLs match their keys */                                │
+│ ∧ ∀ url : dom entries • entries(url).url = url                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* User Session State (for analytics/tracking)
+ * Minimal session tracking for documentation usage
+ */
+┌─ UserSession ─────────────────────────────────────────────────────────────┐
+│ sessionId : seq ℂ                                                           │
+│ visitedPages : seq FilePath                                                 │
+│ startTime : ℤ                                                               │
+│ lastActivity : ℤ                                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ #sessionId > 0                                                              │
+│ ∧ startTime > 0                                                             │
+│ ∧ lastActivity ≥ startTime                                                  │
+│ ∧ #visitedPages > 0                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/* Analytics State
+ * Basic usage analytics
+ */
+┌─ AnalyticsState ──────────────────────────────────────────────────────────┐
+│ activeSessions : seq ℂ ↦ UserSession                                       │
+│ pageViews : FilePath ↦ ℤ                                                   │
+│ searchQueries : seq(seq ℂ)                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* All page view counts are non-negative */                                │
+│ ∀ count : ran pageViews • count ≥ 0                                        │
+│                                                                             │
+│ /* Session IDs are unique */                                               │
+│ ∀ sid : dom activeSessions •                                               │
+│     activeSessions(sid).sessionId = sid                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 5: ENHANCED SYSTEM STATE WITH CACHING
+ ******************************************************************************/
+
+/* Complete System State with Cache
+ * Top-level state including cache and analytics
+ */
+┌─ EnhancedSystemState ─────────────────────────────────────────────────────┐
+│ SystemState                                                                 │
+│ cache : CacheState                                                          │
+│ analytics : AnalyticsState                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ /* Cached URLs correspond to valid pages or assets */                      │
+│ (∀ url : dom cache.entries •                                               │
+│     ∃ path : FilePath •                                                     │
+│         (buildState.status = completed ⇒                                    │
+│             path ∈ dom buildState.artifacts.assets))                        │
+│                                                                             │
+│ /* Page views track actual content pages */                                │
+│ ∧ dom analytics.pageViews ⊆                                                │
+│     {page.filePath | page : ran contentRepo.docs.pages}                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * PART 6: SYSTEM INITIALIZATION
+ ******************************************************************************/
+
+/* Initial System State
+ * State at system startup
+ */
+┌─ InitSystemState ─────────────────────────────────────────────────────────┐
+│ EnhancedSystemState                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ buildState.status = notStarted                                              │
+│ ∧ workerState.requestCount = 0                                              │
+│ ∧ workerState.errorCount = 0                                                │
+│ ∧ #cache.entries = 0                                                        │
+│ ∧ #analytics.activeSessions = 0                                             │
+│ ∧ #analytics.searchQueries = 0                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+/*******************************************************************************
+ * END OF SYSTEM STATE SPECIFICATION
+ ******************************************************************************/
